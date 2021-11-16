@@ -7,7 +7,7 @@ import pandas as pd
 class Queue(object):
     """Simulate a queue."""
 
-    def __init__(self, arrival_rate, departure_rate, compatibility, values, ids):
+    def __init__(self, arrival_rate, departure_rate, compatibility, values, hospital, pairs):
         """
         Parameters:
             arrival_rate: Exponential inter-arrival rate for pairs/donors
@@ -15,74 +15,67 @@ class Queue(object):
             compatibility: Square matrix where M(i, j) denotes whether the donor of pair i can donate to patient of pair j.
             values: Matrix where V(i, j) denotes how much value donor i gives to patient j
             Altruistic donors are included in both matrices, with their corresponding "patient" having 0 for all donors.
-            ids: list of ids with the same length of the compatibility and value matrices
+            hospital: dataframe of the points each hospital has. Includes column 'points'.
+            pairs: dataframe of patient-donor pairs in the system.
+            Includes columns 'id', 'hospital_code', 'abo_donor', 'abo_patient', 'pra', and 'platform_code'.
         """
         self.current = []  # pool of people in the queue (arrived but not matched) - list of indexes
         self._arrivals = []  # list of arrival times
-        self._departures = []  # list of departure times
-        self.matches = []  # list of final matches (tuples of pair ids - may be different from the indexes!)
+        self.departures = []  # list of departure times
+        self.matches = []  # list of final matches (tuples of pair ids - not necessarily the indexes)
+        self.num_transplants = 0
+        self.num_arrivals = 0
+        self.hospital = hospital
 
-        self._current_clock = 0.0
+        self.setup_time = 0.0
+        self.removal_time = 0.0
+
+        self.current_clock = 0.0
 
         self._arrival_rate = arrival_rate
         self._departure_rate = departure_rate
         self._compatibility = compatibility
         self._values = values
-        self._ids = ids
+        self._pairs = pairs
+        self._ids = list(self._pairs.id) # list of ids with the same length of the compatibility and value matrices
 
-    def generate_arrivals(self, num_arrivals):
+    def generate_arrivals_departures(self, num_generate):
         """
-        Generates all arrivals times for 'num_arrivals' pairs based on a poisson process with 'arrival_rate'.
-        Updates 'self._arrivals' with the list of arrival times.
+        Generates all arrival and departure times for 'num_generate' pairs based on a poisson process with 'arrival_rate'
+        and 'departure_rate'.
+        Updates 'self._arrivals' with the list of arrival times and self._departures with the list of departure times.
 
         Parameters:
-            num_arrivals: Number of arrival times to generate
+            num_generate: number of arrivals to generate
         """
         time = 0
-        for i in range(num_arrivals):
+
+        for i in range(num_generate):
             time += np.random.exponential(1.0 / self._arrival_rate)
 
             self._arrivals.append(time)
 
-    def generate_departures(self, num_departures):
-        """
-        Generates all departure times for 'num_departures' pairs based on a poisson process with 'departure_rate'.
-        These are departures without matching.
+            depart = time + np.random.exponential(1.0 / self._departure_rate)
 
-        TODO: parameter can depend on some characteristic of the pair, instead of deterministic departure rate
-
-        Parameters:
-            num_departures: Number of departure times to generate
-        """
-        time = 0
-        for i in range(num_departures):
-            time += np.random.exponential(1.0 / self._departure_rate)
-
-            self._departures.append(time)
+            self.departures.append(depart)
 
     def sample(self):
         """
         Sample (with replacement) from the pairs in order to generate arrivals to the pool.
         Returns the index of the pair given.
         """
-        return np.random.randint(len(self._compatibility))
+        return np.random.randint(len(self._pairs))
 
     def remove_departures(self):
         """
-        Remove pairs departing from the current pool (occurred before self._current_clock) *uniformly at random*.
-        TODO: remove departures depending on some characteristic of the pair instead of randomly
+        Remove pairs departing from the current pool (occurred before self._current_clock)
         """
-        # Number of departures (departure times that are less than current time)
-        num_departures = sum(np.array(self._departures) <= self._current_clock)
-        # Update departure list
-        self._departures = self._departures[num_departures:]
-
-        # Handle case where there are more departure times than people in the pool (because all times generated in advance)
-        removals = min(num_departures, len(self.current))
-
-        # Update current pool (remove random choice from the current pool)
-        self.current = list(np.random.choice(self.current, size=len(self.current) - removals, replace=False))
-
+        # Remove pairs in the active pool that have departure times less than current time
+        for active_pair in reversed(range(len(self.current))):
+            if self.departures[active_pair] <= self.current_clock:
+                # Remove departure times from the list
+                self.departures.pop(active_pair)
+                self.current.pop(active_pair)
 
     def match(self, new_pair_index, both_directions=True, pairs=False):
         """
@@ -136,80 +129,178 @@ class Queue(object):
 
         return matches
 
-    def next_greedy_match(self):
+    def break_tie(self, potential_matches, use_points=True):
+        """
+        Takes in a dictionary of matches (key as index and value as match value) and returns the index with the maximum
+        match value, tie-breaking by looking at the pair coming from the hospital with the greatest amount of points,
+        or tie-breaking arbitrarily.
+        If hospitals have the same number of points, can tie-break arbitrarily.
+
+        Parameters:
+            potential_matches: dictionary of indexes of pairs and their match values.
+            use_points: if True, breaks ties between matches by using the hospital point system
+
+        Returns:
+            The index with the highest match value, tie-breaking with hospital points (if `use_points`=True).
+        """
+        if use_points:
+            # list of indexes that have the maximum match value
+            best_match_index = [k for k, v in potential_matches.items() if v == max(potential_matches.values())]
+
+            # if there's more than one match in the list, need to tie-break
+            if len(best_match_index) > 1:
+                # hospitals that the best matches correspond to
+                hospital_matches = self._pairs.loc[best_match_index, 'hospital_code']
+                # the hospital with the maximum points
+                hospital_max = self.hospital.loc[hospital_matches, 'points'].idxmax()
+                # index with the max points
+                best_match_index = hospital_matches.loc[hospital_matches == hospital_max].index.values
+
+            return best_match_index[0]
+        else:
+            return max(potential_matches)
+
+    def test_arrivals_departures(self):
+        # Update current clock to the next arrival time
+        self.current_clock = self._arrivals.pop(0)
+
+        arrival_index = self.sample()
+        self.num_arrivals += 1
+        self.current.append(arrival_index)
+
+        # Remove departures occurred during the previous period (less than current clock)
+        self.remove_departures()
+
+
+    def next_greedy_match(self, use_points=True, altruistic=True, three_way=True):
         """
         Match upon arrival (greedy). Add match to 'self.matches'
+        Two-way cycles are always considered a match, but can vary if we find altruistic and three-ways as params.
+
+        Parameters:
+            use_points: if True, breaks ties between matches by using the hospital point system
+            altruistic: if True, finds altruistic chains
+            three_way: if True, finds three-way cycles
         """
         num_matches = len(self.matches)
-        # num_arrivals_before_match = 0
 
         # Continue until we get a match
         while len(self.matches) == num_matches:
 
             # Update current clock to the next arrival time
-            self._current_clock = self._arrivals.pop(0)
+            self.current_clock = self._arrivals.pop(0)
 
             arrival_index = self.sample()
+            if (np.isnan(self._compatibility[:, arrival_index]).sum() == len(self._compatibility)) and (not altruistic):
+                # throw away if altruistic donor and continue to next arrival
+                continue
+
+            self.num_arrivals += 1
 
             # Remove departures occurred during the previous period (less than current clock)
             self.remove_departures()
 
             # Check to see if this new pair matches to anyone in the pool.
             # If the new pair is an altruistic donor (no patient attached in pair: patient column is all nan)
-            if np.isnan(self._compatibility[:, arrival_index]).sum() == len(self._compatibility):
-
+            if altruistic and (np.isnan(self._compatibility[:, arrival_index]).sum() == len(self._compatibility)):
                 potential_matches = self.match(arrival_index, both_directions=False)
                 loops = 0
 
                 while potential_matches:
-                    # Get the match with the highest value
-                    best_match_index = max(potential_matches)
+                    # Get the match with the highest value (break ties with hospital points)
+                    best_match_index = self.break_tie(potential_matches, use_points)
+
                     # Add this match
                     self.matches.append((self._ids[arrival_index], self._ids[best_match_index]))
-                    # Remove them from the pool (patient has been satisfied)
+
+                    # Change the hospital's points
+                    self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[arrival_index, 'points']
+                    self.hospital.loc[self._pairs.loc[best_match_index, 'hospital_code']] += self._pairs.loc[best_match_index, 'points']
+
+                    # Remove them from the pool and departure times (patient has been satisfied)
+                    removal_index = np.where(np.array(self.current) == best_match_index)[0][0]
                     self.current.remove(best_match_index)
+                    self.departures.pop(removal_index)
 
                     # Loop to see if that donor paired with the patient can donate to someone in the pool
                     arrival_index = best_match_index
                     potential_matches = self.match(arrival_index, both_directions=False)
                     loops += 1
+                    self.num_transplants += 1
 
                 # No potential matches: add arrival to pool
                 if loops == 0:
                     self.current.append(arrival_index)
 
             # If it's a regular patient-donor pair
+            ## TODO: can clean up following code / consolidate cases
             else:
-                # See if it can have a cycle
-                # cycle_a = datetime.now()
-                cycles = self.match(arrival_index, pairs=True)
-                # cycle_b = datetime.now()
-                # if (cycle_b - cycle_a).total_seconds() > 1:
-                #     print("regular cycle time long")
-
                 # Compare cycle max to regular pair max
-                # regular_a = datetime.now()
                 regular = self.match(arrival_index, both_directions=True)
-                # regular_b = datetime.now()
-                # if (regular_b - regular_a).total_seconds() > 1:
-                #     print("regular pair time long")
 
-                # no cycle or regular matches
-                if ((not cycles) and (not regular)):
+                if three_way:
+                    # See if it can have a cycle
+                    cycles = self.match(arrival_index, pairs=True)
+
+                    # no cycle or regular matches
+                    if ((not cycles) and (not regular)):
+                        self.current.append(arrival_index)
+                    # no regular pair matches or cycles's matches are larger in value
+                    elif (not regular) or (cycles and (max(cycles.values()) >= max(regular.values()))):
+                        best_cycle_index = self.break_tie(cycles, use_points)
+
+                        self.matches.append((self._ids[arrival_index], self._ids[best_cycle_index[0]], self._ids[best_cycle_index[1]]))
+
+                        # Change the hospital's points
+                        self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[
+                            arrival_index, 'points']
+
+                        for i in [0, 1]:
+                            self.hospital.loc[self._pairs.loc[best_cycle_index[i], 'hospital_code']] += self._pairs.loc[
+                                best_cycle_index[i], 'points']
+                            removal_index = np.where(np.array(self.current) == best_cycle_index[i])[0][0]
+                            self.current.remove(best_cycle_index[i])
+                            self.departures.pop(removal_index)
+
+                        self.num_transplants += 3
+                    # regular has a match but cycles does not, or that the max for regular is more than for cycles
+                    elif (not cycles) or (regular and (max(cycles.values()) < max(regular.values()))):
+                        best_regular_index = self.break_tie(regular, use_points)
+                        self.matches.append((self._ids[arrival_index], self._ids[best_regular_index]))
+
+                        # Change the hospital's points
+                        self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[
+                            arrival_index, 'points']
+                        self.hospital.loc[self._pairs.loc[best_regular_index, 'hospital_code']] += self._pairs.loc[
+                            best_regular_index, 'points']
+
+                        removal_index = np.where(np.array(self.current) == best_regular_index)[0][0]
+                        self.current.remove(best_regular_index)
+                        self.departures.pop(removal_index)
+
+                        self.num_transplants += 2
+
+                # just regular two-way matches
+                elif regular:
+                    best_regular_index = self.break_tie(regular, use_points)
+                    self.matches.append((self._ids[arrival_index], self._ids[best_regular_index]))
+
+                    # Change the hospital's points
+                    self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[
+                        arrival_index, 'points']
+                    self.hospital.loc[self._pairs.loc[best_regular_index, 'hospital_code']] += self._pairs.loc[
+                        best_regular_index, 'points']
+
+                    removal_index = np.where(np.array(self.current) == best_regular_index)[0][0]
+                    self.current.remove(best_regular_index)
+                    self.departures.pop(removal_index)
+
+                    self.num_transplants += 2
+                else:
                     self.current.append(arrival_index)
-                # no regular pair matches or cycles's matches are larger in value
-                elif (not regular) or (cycles and (max(cycles.values()) >= max(regular.values()))):
-                    best_cycle_index = max(cycles)
-                    self.matches.append((self._ids[arrival_index], self._ids[best_cycle_index[0]], self._ids[best_cycle_index[1]]))
-                    self.current.remove(best_cycle_index[0])
-                    self.current.remove(best_cycle_index[1])
-                # regular has a match but cycles does not, or that the max for regular is more than for cycles
-                elif (not cycles) or (regular and (max(cycles.values()) < max(regular.values()))):
-                    self.matches.append((self._ids[arrival_index], self._ids[max(regular)]))
-                    self.current.remove(max(regular))
+        # self.current.append(arrival_index)
 
-            # num_arrivals_before_match += 1
-        # print("number of arrivals before match:", num_arrivals_before_match)
+
 
     def next_periodic_match(self, period):
         """
@@ -224,7 +315,7 @@ class Queue(object):
         # Add and remove people from the pool during the period
         while self._current_clock <= next_clock:
             first_arrival_time = self._arrivals[0]
-            first_departure_time = self._departures[0]
+            first_departure_time = self.departures[0]
 
             # arrival occurs first (or if they are concurrent, add an arrival and a departure)
             if (first_arrival_time <= first_departure_time) and (first_arrival_time <= next_clock):
@@ -238,7 +329,7 @@ class Queue(object):
             # departure occurs first (or if they are concurrent, add an arrival and a departure)
             if (first_departure_time <= first_arrival_time) and (first_departure_time <= next_clock):
                 self.remove_departures()
-                self._departures.pop(0)
+                self.departures.pop(0)
 
             # update clock
             self._current_clock = min(first_arrival_time, first_departure_time, next_clock)
@@ -247,25 +338,57 @@ class Queue(object):
         # Change matrices into graph format (write to csv) and call function from other repo
 
 
+
+
+
+
+    # def generate_arrivals(self, num_arrivals):
+    #     """
+    #     Generates all arrivals times for 'num_arrivals' pairs based on a poisson process with 'arrival_rate'.
+    #     Updates 'self._arrivals' with the list of arrival times.
+    #
+    #     Parameters:
+    #         num_arrivals: Number of arrival times to generate
+    #     """
+    #     time = 0
+    #     for i in range(num_arrivals):
+    #         time += np.random.exponential(1.0 / self._arrival_rate)
+    #
+    #         self._arrivals.append(time)
+    #
+    # def generate_departures(self, num_departures):
+    #     """
+    #     Generates all departure times for 'num_departures' pairs based on a poisson process with 'departure_rate'.
+    #     These are departures without matching.
+    #
+    #     TODO: parameter can depend on some characteristic of the pair, instead of deterministic departure rate
+    #
+    #     Parameters:
+    #         num_departures: Number of departure times to generate
+    #     """
+    #     time = 0
+    #     for i in range(num_departures):
+    #         time += np.random.exponential(1.0 / self._departure_rate)
+    #
+    #         self._departures.append(time)
+
 # def main():
 #     dat = pd.read_csv('../Data/kematrix.csv', header=None)
-#
-#     matrix = dat.to_numpy()
 #
 #     ke = pd.read_csv('../Data/kedata.csv', header=None,
 #                      names=['id', 'hospital_code', 'abo_donor', 'abo_patient', 'pra'])
 #     ke[['hospital_code', 'platform_code']] = ke['hospital_code'].str.split('_', expand=True)
 #
-#     q = Queue(arrival_rate=10, departure_rate=1, compatibility=matrix, values=np.ones((len(matrix), len(matrix))))
+#     nkr = (ke.platform_code == "NKR")
+#     ke_nkr = ke[nkr]
 #
+#     dat_nkr = dat[nkr].transpose()[nkr].transpose()
+#
+#     matrix = dat_nkr.to_numpy()
+#
+#     q = Queue(arrival_rate=10, departure_rate=1, compatibility=matrix, values=np.ones((len(matrix), len(matrix))),
+#               ids=list(ke_nkr.id))
 #     num_generate = 100000
-#     q.generate_arrivals(num_generate)
-#     q.generate_departures(num_generate)
-#
-#     while len(q.matches) < 10:
-#         q.next_greedy_match()
-#         print(q.matches)
-#         print("current pool length", len(q.current))
 #
 #
 # main()
