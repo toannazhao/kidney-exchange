@@ -64,6 +64,11 @@ class Queue(object):
         Sample (with replacement) from the pairs in order to generate arrivals to the pool.
         Returns the index of the pair given.
         """
+
+        # ## only allow 2-3 or 3-2 (O-A and A-O)
+        # abo_filtered = self._pairs.loc[((self._pairs.abo_donor == 'O') & (self._pairs.abo_patient == 'A')) | ((self._pairs.abo_donor == 'A') & (self._pairs.abo_patient == 'O'))]
+        # return np.random.choice(abo_filtered.id)
+
         return np.random.randint(len(self._pairs))
 
     def remove_departures(self):
@@ -104,7 +109,7 @@ class Queue(object):
 
                 # Both_directions: if both values > 0, that means M[i,j] and M[j,i] == 1, they are compatible.
                 if (donor_value > 0) and ((patient_value > 0) == both_directions):
-                    value = patient_value + donor_value
+                    value = np.nan_to_num(patient_value) + donor_value
                     matches[potential_match] = value
         else:
             # Loop through combinations of pairs in the pool.
@@ -129,7 +134,7 @@ class Queue(object):
 
         return matches
 
-    def break_tie(self, potential_matches, use_points=True):
+    def break_tie(self, potential_matches, use_points=True, pairs=False):
         """
         Takes in a dictionary of matches (key as index and value as match value) and returns the index with the maximum
         match value, tie-breaking by looking at the pair coming from the hospital with the greatest amount of points,
@@ -139,26 +144,45 @@ class Queue(object):
         Parameters:
             potential_matches: dictionary of indexes of pairs and their match values.
             use_points: if True, breaks ties between matches by using the hospital point system
+            pairs: if True, three-way matching is on so the index is a tuple
 
         Returns:
             The index with the highest match value, tie-breaking with hospital points (if `use_points`=True).
         """
-        if use_points:
-            # list of indexes that have the maximum match value
-            best_match_index = [k for k, v in potential_matches.items() if v == max(potential_matches.values())]
+        # list of indexes that have the maximum match value
+        best_match_index = [k for k, v in potential_matches.items() if v == max(potential_matches.values())]
+        best_index = 0
 
+        if use_points:
             # if there's more than one match in the list, need to tie-break
             if len(best_match_index) > 1:
-                # hospitals that the best matches correspond to
-                hospital_matches = self._pairs.loc[best_match_index, 'hospital_code']
-                # the hospital with the maximum points
-                hospital_max = self.hospital.loc[hospital_matches, 'points'].idxmax()
-                # index with the max points
-                best_match_index = hospital_matches.loc[hospital_matches == hospital_max].index.values
+                # if the index is a tuple, then get the index of the tuple with the highest hospital sum
+                if pairs:
+                    max_points = 0
 
-            return best_match_index[0]
+                    # go over all indexes in the maximum match value list
+                    for i in range(len(best_match_index)):
+                        # hospital of the first and second pair in each index tuple
+                        hospital0 = self._pairs.loc[best_match_index[i][0], 'hospital_code']
+                        hospital1 = self._pairs.loc[best_match_index[i][1], 'hospital_code']
+
+                        # get the sum of points from each pair in the index
+                        hos_pts = self.hospital.loc[hospital0, 'points'] + self.hospital.loc[hospital1, 'points']
+
+                        # if this current index has higher point value than the previous, make it the best index
+                        if hos_pts > max_points:
+                            best_index = i
+                else:
+                    # hospitals that the best matches correspond to
+                    hospital_matches = self._pairs.loc[best_match_index, 'hospital_code']
+                    # the hospital with the maximum points
+                    hospital_max = self.hospital.loc[hospital_matches, 'points'].idxmax()
+                    # index with the max points
+                    best_match_index = hospital_matches.loc[hospital_matches == hospital_max].index.values
+
+            return best_match_index[best_index]
         else:
-            return max(potential_matches)
+            return best_match_index[np.random.randint(len(best_match_index))]
 
     def test_arrivals_departures(self):
         # Update current clock to the next arrival time
@@ -186,24 +210,57 @@ class Queue(object):
 
         # Continue until we get a match
         while len(self.matches) == num_matches:
-
-            # Update current clock to the next arrival time
-            self.current_clock = self._arrivals.pop(0)
-
             arrival_index = self.sample()
+
             if (np.isnan(self._compatibility[:, arrival_index]).sum() == len(self._compatibility)) and (not altruistic):
                 # throw away if altruistic donor and continue to next arrival
                 continue
+
+            # Update current clock to the next arrival time
+            self.current_clock = self._arrivals.pop(0)
 
             self.num_arrivals += 1
 
             # Remove departures occurred during the previous period (less than current clock)
             self.remove_departures()
 
+            # ########################### TESTING BELOW ###################################
+            # match = 0
+            # for potential_match in self.current:
+            #     # Value of donating to this patient
+            #     donor_value = self._compatibility[arrival_index, potential_match] * self._values[
+            #         arrival_index, potential_match]
+            #     # value of receiving this donor as a patient
+            #     patient_value = self._compatibility[potential_match, arrival_index] * self._values[
+            #         potential_match, arrival_index]
+            #
+            #     # Both_directions: if both values > 0, that means M[i,j] and M[j,i] == 1, they are compatible.
+            #     if (donor_value > 0) and (patient_value > 0):
+            #         self.matches.append((self._ids[arrival_index], self._ids[potential_match]))
+            #
+            #         self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[arrival_index, 'points']
+            #         self.hospital.loc[self._pairs.loc[potential_match, 'hospital_code']] += self._pairs.loc[potential_match, 'points']
+            #
+            #         # remove the departure time of the pair just arriving to the pool and immediately got matched
+            #         self.departures.pop(len(self.current))
+            #
+            #         removal_index = np.where(np.array(self.current) == potential_match)[0][0]
+            #         self.current.pop(removal_index)
+            #         self.departures.pop(removal_index)
+            #
+            #         self.num_transplants += 2
+            #         match = 1
+            #         break
+            # if match == 0:
+            #     self.current.append(arrival_index)
+
+            ########################### TESTING ABOVE ###################################
+
             # Check to see if this new pair matches to anyone in the pool.
             # If the new pair is an altruistic donor (no patient attached in pair: patient column is all nan)
             if altruistic and (np.isnan(self._compatibility[:, arrival_index]).sum() == len(self._compatibility)):
                 potential_matches = self.match(arrival_index, both_directions=False)
+
                 loops = 0
 
                 while potential_matches:
@@ -217,9 +274,13 @@ class Queue(object):
                     self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[arrival_index, 'points']
                     self.hospital.loc[self._pairs.loc[best_match_index, 'hospital_code']] += self._pairs.loc[best_match_index, 'points']
 
+                    if loops == 0:
+                        # remove the departure time of the donor just arriving to the pool that immediately got matched
+                        self.departures.pop(len(self.current))
+
                     # Remove them from the pool and departure times (patient has been satisfied)
                     removal_index = np.where(np.array(self.current) == best_match_index)[0][0]
-                    self.current.remove(best_match_index)
+                    self.current.pop(removal_index)
                     self.departures.pop(removal_index)
 
                     # Loop to see if that donor paired with the patient can donate to someone in the pool
@@ -247,7 +308,7 @@ class Queue(object):
                         self.current.append(arrival_index)
                     # no regular pair matches or cycles's matches are larger in value
                     elif (not regular) or (cycles and (max(cycles.values()) >= max(regular.values()))):
-                        best_cycle_index = self.break_tie(cycles, use_points)
+                        best_cycle_index = self.break_tie(cycles, use_points, True)
 
                         self.matches.append((self._ids[arrival_index], self._ids[best_cycle_index[0]], self._ids[best_cycle_index[1]]))
 
@@ -255,11 +316,14 @@ class Queue(object):
                         self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[
                             arrival_index, 'points']
 
+                        self.departures.pop(len(self.current))
+
                         for i in [0, 1]:
                             self.hospital.loc[self._pairs.loc[best_cycle_index[i], 'hospital_code']] += self._pairs.loc[
                                 best_cycle_index[i], 'points']
+
                             removal_index = np.where(np.array(self.current) == best_cycle_index[i])[0][0]
-                            self.current.remove(best_cycle_index[i])
+                            self.current.pop(removal_index)
                             self.departures.pop(removal_index)
 
                         self.num_transplants += 3
@@ -274,14 +338,16 @@ class Queue(object):
                         self.hospital.loc[self._pairs.loc[best_regular_index, 'hospital_code']] += self._pairs.loc[
                             best_regular_index, 'points']
 
+                        self.departures.pop(len(self.current))
                         removal_index = np.where(np.array(self.current) == best_regular_index)[0][0]
-                        self.current.remove(best_regular_index)
+                        self.current.pop(removal_index)
                         self.departures.pop(removal_index)
 
                         self.num_transplants += 2
 
                 # just regular two-way matches
                 elif regular:
+
                     best_regular_index = self.break_tie(regular, use_points)
                     self.matches.append((self._ids[arrival_index], self._ids[best_regular_index]))
 
@@ -291,15 +357,14 @@ class Queue(object):
                     self.hospital.loc[self._pairs.loc[best_regular_index, 'hospital_code']] += self._pairs.loc[
                         best_regular_index, 'points']
 
+                    self.departures.pop(len(self.current))
                     removal_index = np.where(np.array(self.current) == best_regular_index)[0][0]
-                    self.current.remove(best_regular_index)
+                    self.current.pop(removal_index)
                     self.departures.pop(removal_index)
 
                     self.num_transplants += 2
                 else:
                     self.current.append(arrival_index)
-        # self.current.append(arrival_index)
-
 
 
     def next_periodic_match(self, period):
