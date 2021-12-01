@@ -23,12 +23,9 @@ class Queue(object):
         self._arrivals = []  # list of arrival times
         self.departures = []  # list of departure times
         self.matches = []  # list of final matches (tuples of pair ids - not necessarily the indexes)
-        self.num_transplants = 0
-        self.num_arrivals = 0
-        self.hospital = hospital
-
-        self.setup_time = 0.0
-        self.removal_time = 0.0
+        self.num_transplants = 0 # total number of transplants done (ex: for one three-way match, +3 transplants)
+        self.num_arrivals = 0 # total number of arrivals into the system
+        self.hospital = hospital # keep track of hospital points
 
         self.current_clock = 0.0
 
@@ -64,10 +61,6 @@ class Queue(object):
         Sample (with replacement) from the pairs in order to generate arrivals to the pool.
         Returns the index of the pair given.
         """
-
-        # ## only allow 2-3 or 3-2 (O-A and A-O)
-        # abo_filtered = self._pairs.loc[((self._pairs.abo_donor == 'O') & (self._pairs.abo_patient == 'A')) | ((self._pairs.abo_donor == 'A') & (self._pairs.abo_patient == 'O'))]
-        # return np.random.choice(abo_filtered.id)
 
         return np.random.randint(len(self._pairs))
 
@@ -185,6 +178,7 @@ class Queue(object):
             return best_match_index[np.random.randint(len(best_match_index))]
 
     def test_arrivals_departures(self):
+        """Test arrivals and departures without matching."""
         # Update current clock to the next arrival time
         self.current_clock = self._arrivals.pop(0)
 
@@ -223,38 +217,6 @@ class Queue(object):
 
             # Remove departures occurred during the previous period (less than current clock)
             self.remove_departures()
-
-            # ########################### TESTING BELOW ###################################
-            # match = 0
-            # for potential_match in self.current:
-            #     # Value of donating to this patient
-            #     donor_value = self._compatibility[arrival_index, potential_match] * self._values[
-            #         arrival_index, potential_match]
-            #     # value of receiving this donor as a patient
-            #     patient_value = self._compatibility[potential_match, arrival_index] * self._values[
-            #         potential_match, arrival_index]
-            #
-            #     # Both_directions: if both values > 0, that means M[i,j] and M[j,i] == 1, they are compatible.
-            #     if (donor_value > 0) and (patient_value > 0):
-            #         self.matches.append((self._ids[arrival_index], self._ids[potential_match]))
-            #
-            #         self.hospital.loc[self._pairs.loc[arrival_index, 'hospital_code']] += self._pairs.loc[arrival_index, 'points']
-            #         self.hospital.loc[self._pairs.loc[potential_match, 'hospital_code']] += self._pairs.loc[potential_match, 'points']
-            #
-            #         # remove the departure time of the pair just arriving to the pool and immediately got matched
-            #         self.departures.pop(len(self.current))
-            #
-            #         removal_index = np.where(np.array(self.current) == potential_match)[0][0]
-            #         self.current.pop(removal_index)
-            #         self.departures.pop(removal_index)
-            #
-            #         self.num_transplants += 2
-            #         match = 1
-            #         break
-            # if match == 0:
-            #     self.current.append(arrival_index)
-
-            ########################### TESTING ABOVE ###################################
 
             # Check to see if this new pair matches to anyone in the pool.
             # If the new pair is an altruistic donor (no patient attached in pair: patient column is all nan)
@@ -400,60 +362,4 @@ class Queue(object):
             self._current_clock = min(first_arrival_time, first_departure_time, next_clock)
 
         # TODO: complete function with optimization of people in the current pool
-        # Change matrices into graph format (write to csv) and call function from other repo
-
-
-
-
-
-
-    # def generate_arrivals(self, num_arrivals):
-    #     """
-    #     Generates all arrivals times for 'num_arrivals' pairs based on a poisson process with 'arrival_rate'.
-    #     Updates 'self._arrivals' with the list of arrival times.
-    #
-    #     Parameters:
-    #         num_arrivals: Number of arrival times to generate
-    #     """
-    #     time = 0
-    #     for i in range(num_arrivals):
-    #         time += np.random.exponential(1.0 / self._arrival_rate)
-    #
-    #         self._arrivals.append(time)
-    #
-    # def generate_departures(self, num_departures):
-    #     """
-    #     Generates all departure times for 'num_departures' pairs based on a poisson process with 'departure_rate'.
-    #     These are departures without matching.
-    #
-    #     TODO: parameter can depend on some characteristic of the pair, instead of deterministic departure rate
-    #
-    #     Parameters:
-    #         num_departures: Number of departure times to generate
-    #     """
-    #     time = 0
-    #     for i in range(num_departures):
-    #         time += np.random.exponential(1.0 / self._departure_rate)
-    #
-    #         self._departures.append(time)
-
-# def main():
-#     dat = pd.read_csv('../Data/kematrix.csv', header=None)
-#
-#     ke = pd.read_csv('../Data/kedata.csv', header=None,
-#                      names=['id', 'hospital_code', 'abo_donor', 'abo_patient', 'pra'])
-#     ke[['hospital_code', 'platform_code']] = ke['hospital_code'].str.split('_', expand=True)
-#
-#     nkr = (ke.platform_code == "NKR")
-#     ke_nkr = ke[nkr]
-#
-#     dat_nkr = dat[nkr].transpose()[nkr].transpose()
-#
-#     matrix = dat_nkr.to_numpy()
-#
-#     q = Queue(arrival_rate=10, departure_rate=1, compatibility=matrix, values=np.ones((len(matrix), len(matrix))),
-#               ids=list(ke_nkr.id))
-#     num_generate = 100000
-#
-#
-# main()
+        # call function from other repo
